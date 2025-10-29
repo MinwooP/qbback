@@ -18,7 +18,6 @@ def health_check(request):
     """API 연결 상태 확인"""
     return Response({'status': 'ok', 'message': 'API is running'})
 
-
 # ==================== 인증 관련 ====================
 class AuthViewSet(viewsets.ViewSet):
     """인증 관련 API"""
@@ -244,6 +243,10 @@ def chat(request):
     """
     메시지 전송 및 SQL 쿼리 실행
     대화방별 컨텍스트를 활용한 멀티턴 대화
+
+    - conversation_id가 없으면 새 대화 생성
+    - conversation_id가 있으면 기존 대화 사용
+    - 첫 메시지로 제목 자동 설정
     """
 
     # custom_user 사용
@@ -256,22 +259,44 @@ def chat(request):
         )
     
     user_message = request.data.get('message')
-    conversation_id = request.data.get('conversation_id')
+    conversation_id = request.data.get('conversation_id') # 존재하지 않을 수 있음 
     
-    if not all([user_message, conversation_id]):
+    if not user_message:
         return Response(
-            {'error': '필수 정보가 누락되었습니다.'},
+            {'error': '메시지가 필요합니다.'},
             status=status.HTTP_400_BAD_REQUEST
         )
-    
-    try:
-        # 대화방 조회 및 권한 확인
-        conversation = Conversation.objects.get(
-            conversation_id=conversation_id,
-            user=user,
-            is_deleted=False
-        )
 
+    try:
+        # conversation_id가 없으면 새로 생성
+        if not conversation_id:
+            # 첫 메시지로 제목 생성 (최대 50자)
+            title = user_message[:50] + ('...' if len(user_message) > 50 else '')
+            
+            # 대화 생성 (세션 ID 포함)
+            conversation = Conversation.create_conversation_with_session(
+                user=user,
+                title=title
+            )
+            
+            # 컨텍스트 생성
+            ConversationContext.objects.create(
+                conversation=conversation
+            )
+            
+            print(f"[Chat] 새 대화 생성: ID={conversation.conversation_id}, "
+                  f"Session={conversation.conversation_session_id}")
+        else:
+            # 기존 대화 조회 및 권한 확인
+            conversation = Conversation.objects.get(
+                conversation_id=conversation_id,
+                user=user,
+                is_deleted=False
+            )
+            
+            print(f"[Chat] 기존 대화 사용: ID={conversation.conversation_id}, "
+                  f"Session={conversation.conversation_session_id}")
+    
         # 대화방 컨텍스트 가져오기 또는 생성
         context, created = ConversationContext.objects.get_or_create(
             conversation=conversation
@@ -287,66 +312,68 @@ def chat(request):
         # 컨텍스트에 메시지 추가
         context.add_message('user', user_message)
         
+
         # 최근 대화 히스토리 가져오기 (멀티턴을 위해)
         recent_history = context.get_recent_history(limit=10)
         
-        # TODO: LLM을 이용한 SQL 생성 (히스토리 포함)
-        # 예: sql_query = generate_sql_with_llm(user_message, recent_history)
+        # AI Agent 호출 (conversation_session_id 사용)
         
+        # TODO: 실제 AI Agent 호출
+        # import requests
+        # ai_response = requests.post(
+        #     f"{settings.AI_AGENT_URL}/chat",
+        #     json={
+        #         "message": user_message,
+        #         "session_id": conversation.conversation_session_id,  # ⭐
+        #         "conversation_history": recent_history
+        #     },
+        #     timeout=30
+        # 
+        
+        # 임시 데이터
         sql_query = "SELECT * FROM users LIMIT 10;"
+        assistant_response = "요청하신 데이터를 조회했습니다."
+        results = []
+            
+        # Assistant 응답 저장
+        assistant_msg = Message.objects.create(
+            conversation=conversation,
+            sender='assistant',
+            message_text=assistant_response,
+            sql_query=sql_query,                
+            sql_results=results
+        )
+            
+        # 컨텍스트에 응답 추가
+        context.add_message('assistant', assistant_response)
+            
+        # 대화의 last_message_at 업데이트
+        conversation.last_message_at = timezone.now()            
+        conversation.save(update_fields=['last_message_at', 'updated_at'])
+            
+        return Response({
+            'success': True,
+            'conversation_id': conversation.conversation_id,  # ⭐ 새로 생성된 경우 반환
+            'conversation_session_id': conversation.conversation_session_id,  # ⭐
+            'title': conversation.title,
+            'user_message': MessageSerializer(user_msg).data,
+            'assistant_message': MessageSerializer(assistant_msg).data,
+            'sql_query': sql_query,
+            'results': results,
+            'message_count': context.message_count
+        })
         
-        # SQL 실행
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute(sql_query)
-                columns = [col[0] for col in cursor.description]
-                results = [dict(zip(columns, row)) for row in cursor.fetchall()]
-            
-            assistant_response = '요청하신 데이터를 조회했습니다.'
-            
-            # Assistant 응답 저장
-            assistant_msg = Message.objects.create(
-                conversation=conversation,
-                sender='assistant',
-                message_text=assistant_response,
-                sql_query=sql_query,
-                sql_results=results
-            )
-            
-            # 컨텍스트에 응답 추가
-            context.add_message('assistant', assistant_response)
-            
-            # 대화의 last_message_at 업데이트
-            conversation.last_message_at = timezone.now()
-            conversation.save(update_fields=['last_message_at'])
-            
-            return Response({
-                'response': assistant_response,
-                'sql': sql_query,
-                'results': results,
-                'plan_analysis': None,
-                'conversation_context': {
-                    'message_count': context.message_count,
-                    'history_length': len(recent_history)
-                }
-            })
-        
-        except Exception as e:
-            error_msg = f'쿼리 실행 중 오류가 발생했습니다: {str(e)}'
-            Message.objects.create(
-                conversation=conversation,
-                sender='assistant',
-                message_text=error_msg,
-                error_message=str(e)
-            )
-            
-            return Response(
-                {'error': error_msg},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-    
     except Conversation.DoesNotExist:
         return Response(
-            {'error': '대화를 찾을 수 없거나 접근 권한이 없습니다.'},
+            {'error': '대화를 찾을 수 없습니다.'},
             status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Chat error: {str(e)}")
+        
+        return Response(
+            {'error': f'처리 중 오류 발생: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )

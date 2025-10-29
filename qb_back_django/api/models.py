@@ -79,6 +79,12 @@ class Conversation(models.Model):
     conversation_id = models.AutoField(primary_key=True)
     user = models.ForeignKey(User, on_delete=models.CASCADE, db_column='user_id')
     title = models.CharField(max_length=255, default='새 대화')
+    conversation_session_id = models.CharField(
+        max_length=64, 
+        unique=True, 
+        null=True, 
+        blank=True
+    )
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
     last_message_at = models.DateTimeField(null=True, blank=True)
@@ -88,9 +94,26 @@ class Conversation(models.Model):
         db_table = 'conversations'
         managed = False
         ordering = ['-last_message_at']
-    
+
     def __str__(self):
         return f"{self.title} - {self.user.username}"
+    
+    @classmethod
+    def create_conversation_with_session(cls, user, title='새 대화'):
+        """
+        대화 생성 시 고유한 세션 ID도 함께 생성
+        """
+        # 고유한 세션 ID 생성 (48 bytes = 64 chars in base64)
+        conversation_session_id = f"conv_{secrets.token_urlsafe(36)}"
+        
+        # 대화 생성
+        conversation = cls.objects.create(
+            user=user,
+            title=title,
+            conversation_session_id=conversation_session_id
+        )
+        
+        return conversation
 
 class ConversationContext(models.Model):
     """대화방별 컨텍스트 저장"""

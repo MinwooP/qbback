@@ -22,7 +22,7 @@ class ConversationSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Conversation
-        fields = ['conversation_id', 'user', 'title', 'created_at', 
+        fields = ['conversation_id', 'user', 'title', 'conversation_session_id', 'created_at', 
                  'updated_at', 'last_message_at', 'is_deleted', 'messages']
         read_only_fields = ['conversation_id', 'created_at', 'updated_at']
 
@@ -33,7 +33,7 @@ class ConversationListSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Conversation
-        fields = ['conversation_id', 'title', 'created_at', 'updated_at', 
+        fields = ['conversation_id', 'title', 'conversation_session_id', 'created_at', 'updated_at', 
                  'last_message_at', 'message_count']
     
     def get_message_count(self, obj):
