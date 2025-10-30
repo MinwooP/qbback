@@ -520,100 +520,117 @@ export default {
 
     // 메시지 전송
     const sendMessage = async () => {
+      // 유저가 입력한 메세지 가져오기 
       const userMessageText = newMessage.value.trim()
       if (!userMessageText) return
 
-       // UI에 사용자 메시지 먼저 표시
-      const currentConversation = conversations.value.find(
-        c => c.id === currentConversationId.value || c.isTemporary
-      )
-  
-      if (currentConversation) {
-        const newUserMessage = {
-          id: messageIdCounter.value++,
-          sender: 'user',
-          text: userMessageText,
-          timestamp: new Date()
-        }
-        currentConversation.messages.push(newUserMessage)
+      // ============================================
+      // 1. 현재 대화방 찾기 (임시 대화방 포함)
+      // ============================================
+      let currentConversation = conversations.value.find(
+        c => c.id === currentConversationId.value
+      );
+
+      // 대화방이 없으면 임시 생성 (방어 코드)
+      if (!currentConversation) {
+        currentConversation = {
+          id: null,
+          title: '새 대화',
+          messages: [],
+          lastMessage: new Date(),
+          isTemporary: true
+        };
+        conversations.value.push(currentConversation);
+        currentConversationId.value = null;
       }
 
-      newMessage.value = ''
+      // ============================================
+      // 2. UI에 사용자 메시지 먼저 표시
+      // ============================================
+      const newUserMessage = {
+        id: messageIdCounter.value++,
+        sender: 'user',
+        text: userMessageText,
+        timestamp: new Date()
+      };
+
+      currentConversation.messages.push(newUserMessage);
+      currentConversation.lastMessage = new Date();
+
+      newMessage.value = '';
       nextTick(() => {
-        scrollToBottom()
-      })
+        if (chatInput.value) {
+          chatInput.value.style.height = 'auto';
+        }
+        scrollToBottom();
+        highlightSQLCode();
+      });
   
       isTyping.value = true
 
       try {
-        // ========================================
-        // conversation_id 없이 요청 가능!
-        // ========================================
-        const response = await axios.post(
-          'http://localhost:8012/api/v1/chat/',
-          {
-            conversation_id: currentConversationId.value,  // null 가능
-            message: userMessageText
+        // ============================================
+        // 3. Django Backend API 호출
+        // conversation_id가 없으면 null로 전송 → 백엔드가 자동 생성
+        // ============================================
+        const apiResponse = await fetch(`${API_URL}/chat/`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${sessionStorage.getItem('sessionToken')}`
           },
-          {
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${sessionStorage.getItem('sessionToken')}`
-            }
-          }
-        )
+          body: JSON.stringify({
+            message: userMessageText,
+            conversation_id: currentConversationId.value  // null일 수 있음 (첫 메시지인 경우)
+          })
+        });
     
-        const responseData = response.data
+        if (!apiResponse.ok) {
+          throw new Error(`HTTP error! status: ${apiResponse.status}`);
+        }
 
-        // ========================================
-        // 새로 생성된 경우 ID 업데이트
-        // ========================================
+        const responseData = await apiResponse.json();
+
+        // ============================================
+        // 4. 새로 생성된 대화방 ID 업데이트 (첫 메시지인 경우)
+        // ============================================
         if (!currentConversationId.value && responseData.conversation_id) {
-          currentConversationId.value = responseData.conversation_id
-          currentConversationSessionId.value = responseData.conversation_session_id
+          // 로컬 상태 업데이트
+          currentConversationId.value = responseData.conversation_id;
+          currentConversationSessionId.value = responseData.conversation_session_id;
           
-          // 임시 대화방 업데이트
-          if (currentConversation && currentConversation.isTemporary) {
-            currentConversation.id = responseData.conversation_id
-            currentConversation.title = responseData.title
-            currentConversation.isTemporary = false
-          }
+          // 임시 대화방을 실제 대화방으로 전환
+          currentConversation.id = responseData.conversation_id;
+          currentConversation.title = responseData.title || userMessageText.substring(0, 30);
+          currentConversation.isTemporary = false;
           
           console.log('새 대화 생성됨:', {
             conversation_id: responseData.conversation_id,
             conversation_session_id: responseData.conversation_session_id,
             title: responseData.title
-          })
+          });
         }
-    
 
-        // AI 응답 추가
+        isTyping.value = false;
+
+        // ============================================
+        // 5. AI 응답 메시지 처리 (기존 로직 유지)
+        // ============================================
         const newBotMessage = {
           id: messageIdCounter.value++,
           sender: 'assistant',
-          response: responseData.assistant_message?.message_text || '',
-          sql: responseData.sql_query || '',
-          results: responseData.results || [],
+          response: responseData.response || '',
+          sql: responseData.sql || '',
+          plan_analysis: responseData.plan_analysis ? '' : (responseData.plan_analysis || ''),
+          hasPlanAnalysis: !!(responseData.plan_analysis),
+          results: responseData.results && responseData.results.length > 0 ? [] : (responseData.results || []),
+          showNoResults: false,
+          error: responseData.error || '',
           timestamp: new Date()
-        }
-    
-        // 기존 newBotMessage 구조 
-        // const newBotMessage = {
-        //   id: messageIdCounter.value++,
-        //   sender: 'assistant',
-        //   response: responseData.response || '',
-        //   sql: responseData.sql || '',
-        //   plan_analysis: responseData.plan_analysis ? '' : (responseData.plan_analysis || ''),
-        //   hasPlanAnalysis: !!(responseData.plan_analysis),
-        //   results: responseData.results && responseData.results.length > 0 ? [] : (responseData.results || []),
-        //   showNoResults: false,
-        //   error: responseData.error || '',
-        //   timestamp: new Date()
-        // };
+        };
 
-        if (currentConversation) {
-	        currentConversation.messages.push(newBotMessage)
-        }
+        currentConversation.messages.push(newBotMessage);
+        currentConversation.lastMessage = new Date();
     
         isTyping.value = false
 
@@ -621,6 +638,10 @@ export default {
         scrollToBottom();
         highlightSQLCode();
 
+
+        // ============================================
+        // 6. Plan analysis typing effect (기존 로직 유지)
+        // ============================================
         // Plan analysis typing effect
         if (responseData.plan_analysis) {
           await new Promise((resolveTyping) => {
@@ -673,7 +694,6 @@ export default {
             });
           }
         }
-
       } catch (errorObject) {
         console.error('Error:', errorObject);
         let errorMessageText = '죄송합니다. 오류가 발생했습니다.';
@@ -903,10 +923,10 @@ export default {
     }
 
     // ========================================
-    // "새 대화" 버튼 동작 변경
+    // 새 대화 버튼 클릭 시 로컬에서만 임시 대화방 생성
     // ========================================
     const createNewChat = () => {
-      // 이제 서버에 요청하지 않고, 로컬에서만 상태 초기화
+      // 서버 호출 없이 로컬에서만 상태 초기화
       currentConversationId.value = null
       currentConversationSessionId.value = null
       
@@ -920,7 +940,6 @@ export default {
       }
       
       conversations.value.unshift(tempConversation)
-      
       console.log('새 대화 준비 (서버 생성 안 됨)')
     }
 
