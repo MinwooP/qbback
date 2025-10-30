@@ -454,6 +454,7 @@ export default {
     // 반응형 데이터
     const conversations = ref([])
     const currentConversationId = ref(null)
+    const currentConversationSessionId = ref(null)
     const newMessage = ref('')
     const isTyping = ref(false)
     const messageIdCounter = ref(1)
@@ -519,83 +520,102 @@ export default {
 
     // 메시지 전송
     const sendMessage = async () => {
-      const userMessageText = newMessage.value.trim() || '테스트 메시지';
-      const currentConversation = conversations.value.find(c => c.id === currentConversationId.value);
-      if (!currentConversation) return;
+      const userMessageText = newMessage.value.trim()
+      if (!userMessageText) return
 
-      // 사용자 메시지 추가
-      const newUserMessage = {
-        id: messageIdCounter.value++,
-        sender: 'user',
-        text: userMessageText,
-        timestamp: new Date()
-      };
-
-      currentConversation.messages.push(newUserMessage);
-      currentConversation.lastMessage = new Date();
-
-      // 대화 제목 업데이트
-      if (currentConversation.messages.filter(m => m.sender === 'user').length === 1) {
-        currentConversation.title = userMessageText.length > 30 ? 
-          userMessageText.substring(0, 30) + '...' : 
-          userMessageText;
+       // UI에 사용자 메시지 먼저 표시
+      const currentConversation = conversations.value.find(
+        c => c.id === currentConversationId.value || c.isTemporary
+      )
+  
+      if (currentConversation) {
+        const newUserMessage = {
+          id: messageIdCounter.value++,
+          sender: 'user',
+          text: userMessageText,
+          timestamp: new Date()
+        }
+        currentConversation.messages.push(newUserMessage)
       }
 
-      newMessage.value = '';
+      newMessage.value = ''
       nextTick(() => {
-        if (chatInput.value) {
-          chatInput.value.style.height = 'auto';
-        }
-        scrollToBottom();
-        highlightSQLCode();
-      });
-
-      isTyping.value = true;
+        scrollToBottom()
+      })
+  
+      isTyping.value = true
 
       try {
-        const apiResponse = await fetch(`${API_URL}/chat`, {
-          method: 'POST',
-          // credentials: 'include', // 쿠키 자동 포함
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Session-ID': sessionStorage.getItem("sessionId"),
-            'Authorization': sessionStorage.getItem('sessionToken')
+        // ========================================
+        // conversation_id 없이 요청 가능!
+        // ========================================
+        const response = await axios.post(
+          'http://localhost:8012/api/v1/chat/',
+          {
+            conversation_id: currentConversationId.value,  // null 가능
+            message: userMessageText
           },
-          body: JSON.stringify({
-            message: userMessageText,
-            conversation_history: conversationHistory.value.slice(-10),
-            session_id: sessionStorage.getItem("sessionId")
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${sessionStorage.getItem('sessionToken')}`
+            }
+          }
+        )
+    
+        const responseData = response.data
+
+        // ========================================
+        // 새로 생성된 경우 ID 업데이트
+        // ========================================
+        if (!currentConversationId.value && responseData.conversation_id) {
+          currentConversationId.value = responseData.conversation_id
+          currentConversationSessionId.value = responseData.conversation_session_id
+          
+          // 임시 대화방 업데이트
+          if (currentConversation && currentConversation.isTemporary) {
+            currentConversation.id = responseData.conversation_id
+            currentConversation.title = responseData.title
+            currentConversation.isTemporary = false
+          }
+          
+          console.log('새 대화 생성됨:', {
+            conversation_id: responseData.conversation_id,
+            conversation_session_id: responseData.conversation_session_id,
+            title: responseData.title
           })
-        });
-
-        if (!apiResponse.ok) {
-          throw new Error(`HTTP error! status: ${apiResponse.status}`);
         }
+    
 
-        const responseData = await apiResponse.json();
-
-        conversationHistory.value.push(
-          { role: 'user', content: userMessageText },
-          { role: 'assistant', content: responseData }
-        );
-
-        isTyping.value = false;
-
+        // AI 응답 추가
         const newBotMessage = {
           id: messageIdCounter.value++,
           sender: 'assistant',
-          response: responseData.response || '',
-          sql: responseData.sql || '',
-          plan_analysis: responseData.plan_analysis ? '' : (responseData.plan_analysis || ''),
-          hasPlanAnalysis: !!(responseData.plan_analysis),
-          results: responseData.results && responseData.results.length > 0 ? [] : (responseData.results || []),
-          showNoResults: false,
-          error: responseData.error || '',
+          response: responseData.assistant_message?.message_text || '',
+          sql: responseData.sql_query || '',
+          results: responseData.results || [],
           timestamp: new Date()
-        };
+        }
+    
+        // 기존 newBotMessage 구조 
+        // const newBotMessage = {
+        //   id: messageIdCounter.value++,
+        //   sender: 'assistant',
+        //   response: responseData.response || '',
+        //   sql: responseData.sql || '',
+        //   plan_analysis: responseData.plan_analysis ? '' : (responseData.plan_analysis || ''),
+        //   hasPlanAnalysis: !!(responseData.plan_analysis),
+        //   results: responseData.results && responseData.results.length > 0 ? [] : (responseData.results || []),
+        //   showNoResults: false,
+        //   error: responseData.error || '',
+        //   timestamp: new Date()
+        // };
 
-        currentConversation.messages.push(newBotMessage);
-        currentConversation.lastMessage = new Date();
+        if (currentConversation) {
+	        currentConversation.messages.push(newBotMessage)
+        }
+    
+        isTyping.value = false
 
         await nextTick();
         scrollToBottom();
@@ -882,31 +902,53 @@ export default {
       }
     }
 
-    // 새 채팅 생성
+    // ========================================
+    // "새 대화" 버튼 동작 변경
+    // ========================================
     const createNewChat = () => {
-      const newConversation = {
-        id: conversationIdCounter.value++,
+      // 이제 서버에 요청하지 않고, 로컬에서만 상태 초기화
+      currentConversationId.value = null
+      currentConversationSessionId.value = null
+      
+      // UI에 빈 대화방 추가 (임시)
+      const tempConversation = {
+        id: null,  // 아직 서버에 생성 안 됨
         title: '새 대화',
         lastMessage: new Date(),
-        messages: []
+        messages: [],
+        isTemporary: true  // 임시 플래그
       }
-
-      conversations.value.unshift(newConversation)
-      currentConversationId.value = newConversation.id
-      conversationHistory.value = []
-
-      nextTick(() => {
-        scrollToBottom()
-      })
+      
+      conversations.value.unshift(tempConversation)
+      
+      console.log('새 대화 준비 (서버 생성 안 됨)')
     }
 
-    const highlightSQLCode = () => {
-      nextTick(() => {
-        document.querySelectorAll('code.language-sql').forEach((block) => {
-          Prism.highlightElement(block)
-        })
-      })
-    }
+    // 새 채팅 생성 이전 버전 기록
+    // const createNewChat = () => {
+    //   const newConversation = {
+    //     id: conversationIdCounter.value++,
+    //     title: '새 대화',
+    //     lastMessage: new Date(),
+    //     messages: []
+    //   }
+
+    //   conversations.value.unshift(newConversation)
+    //   currentConversationId.value = newConversation.id
+    //   conversationHistory.value = []
+
+    //   nextTick(() => {
+    //     scrollToBottom()
+    //   })
+    // }
+
+    // const highlightSQLCode = () => {
+    //   nextTick(() => {
+    //     document.querySelectorAll('code.language-sql').forEach((block) => {
+    //       Prism.highlightElement(block)
+    //     })
+    //   })
+    // }
 
     // 클립보드 복사 함수
     const copyQueryToClipboard = async (query, messageId) => {
