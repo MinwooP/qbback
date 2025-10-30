@@ -1,4 +1,5 @@
 import bcrypt
+import requests
 from django.utils import timezone
 from django.db import connection
 from rest_framework import status, viewsets
@@ -10,7 +11,9 @@ from .serializers import (UserSerializer, ConversationSerializer,
                          ConversationListSerializer, MessageSerializer)
 import uuid
 import json
+import logging
 
+logger = logging.getLogger(__name__)
 
 # ==================== 헬스 체크 ====================
 @api_view(['GET'])
@@ -140,11 +143,14 @@ class AuthViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='validate')
     def validate_session(self, request):
         """세션 유효성 검증"""
+
+        user = getattr(request, 'custom_user', None)
+
         if hasattr(request, 'session_obj'):
             return Response({
                 'valid': True,
-                'userId': request.user.user_id,
-                'username': request.user.username,
+                'userId': user.user_id,  # ← request.custom_user 사용
+                'username': user.username,  # ← request.custom_user 사용
                 'expiresAt': request.session_obj.expires_at.isoformat()
             })
         
@@ -258,6 +264,9 @@ def chat(request):
             status=status.HTTP_401_UNAUTHORIZED
         )
     
+    # UI로부터 받는 것
+    # 1. 유저 메세지
+    # 2. conversationid => 이를 이용해 벡엔드에서 conversation session 접근
     user_message = request.data.get('message')
     conversation_id = request.data.get('conversation_id') # 존재하지 않을 수 있음 
     
@@ -284,8 +293,8 @@ def chat(request):
                 conversation=conversation
             )
             
-            print(f"[Chat] 새 대화 생성: ID={conversation.conversation_id}, "
-                  f"Session={conversation.conversation_session_id}")
+            logger.info(f"[Chat] 새 대화 생성: ID={conversation.conversation_id}, "
+                       f"Session={conversation.conversation_session_id}")
         else:
             # 기존 대화 조회 및 권한 확인
             conversation = Conversation.objects.get(
@@ -294,8 +303,8 @@ def chat(request):
                 is_deleted=False
             )
             
-            print(f"[Chat] 기존 대화 사용: ID={conversation.conversation_id}, "
-                  f"Session={conversation.conversation_session_id}")
+            logger.info(f"[Chat] 기존 대화 사용: ID={conversation.conversation_id}, "
+                       f"Session={conversation.conversation_session_id}")
     
         # 대화방 컨텍스트 가져오기 또는 생성
         context, created = ConversationContext.objects.get_or_create(
@@ -316,32 +325,73 @@ def chat(request):
         # 최근 대화 히스토리 가져오기 (멀티턴을 위해)
         recent_history = context.get_recent_history(limit=10)
         
+        # ================================================
         # AI Agent 호출 (conversation_session_id 사용)
+        try:
+            logger.info(f"[Chat] AI Agent 호출 시작: {settings.AI_AGENT_URL}/chat")
+            
+
+            # AI Agent API 호출
+            ai_response = requests.post(
+                f"{settings.AI_AGENT_URL}/chat",
+                json={
+                    "message": user_message,
+                    "session_id": conversation.conversation_session_id,
+                    "conversation_history": recent_history
+                },
+                headers={
+                    'Content-Type': 'application/json',
+                },
+                timeout=settings.AI_AGENT_TIMEOUT # settings에서 설정한 time out 적용
+            )
+            
+            # AI Agent 응답 확인
+            ai_response.raise_for_status()
+            ai_data = ai_response.json()
+            
+            logger.info(f"[Chat] AI Agent 응답 성공")
+            
+            # AI 응답에서 데이터 추출 => 응답오지 않았을 경우 기본값 처리
+            assistant_response = ai_data.get('response', '')
+            sql_query = ai_data.get('sql', '')
+            plan_analysis = ai_data.get('plan_analysis', '')
+            results = ai_data.get('results', [])
+            error_message = ai_data.get('error', '')
+            
+        except requests.exceptions.Timeout:
+            logger.error(f"[Chat] AI Agent 타임아웃")
+            assistant_response = "AI Agent 응답 시간이 초과되었습니다."
+            sql_query = ""
+            plan_analysis = ""
+            results = []
+            error_message = "Timeout error"
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[Chat] AI Agent 통신 오류: {str(e)}")
+            assistant_response = "AI Agent와 통신 중 오류가 발생했습니다."
+            sql_query = ""
+            plan_analysis = ""
+            results = []
+            error_message = str(e)
         
-        # TODO: 실제 AI Agent 호출
-        # import requests
-        # ai_response = requests.post(
-        #     f"{settings.AI_AGENT_URL}/chat",
-        #     json={
-        #         "message": user_message,
-        #         "session_id": conversation.conversation_session_id,  # ⭐
-        #         "conversation_history": recent_history
-        #     },
-        #     timeout=30
-        # 
-        
-        # 임시 데이터
-        sql_query = "SELECT * FROM users LIMIT 10;"
-        assistant_response = "요청하신 데이터를 조회했습니다."
-        results = []
+        except json.JSONDecodeError as e:
+            logger.error(f"[Chat] AI Agent 응답 파싱 오류: {str(e)}")
+            assistant_response = "AI Agent 응답을 처리할 수 없습니다."
+            sql_query = ""
+            plan_analysis = ""
+            results = []
+            error_message = "JSON decode error"
+ 
             
         # Assistant 응답 저장
         assistant_msg = Message.objects.create(
             conversation=conversation,
             sender='assistant',
             message_text=assistant_response,
-            sql_query=sql_query,                
-            sql_results=results
+            sql_query=sql_query if sql_query else None,
+            sql_results=results if results else None,
+            plan_analysis=plan_analysis if plan_analysis else None,
+            error_message=error_message if error_message else None
         )
             
         # 컨텍스트에 응답 추가
@@ -353,27 +403,32 @@ def chat(request):
             
         return Response({
             'success': True,
-            'conversation_id': conversation.conversation_id,  # ⭐ 새로 생성된 경우 반환
-            'conversation_session_id': conversation.conversation_session_id,  # ⭐
+            'conversation_id': conversation.conversation_id,
+            'conversation_session_id': conversation.conversation_session_id,
             'title': conversation.title,
             'user_message': MessageSerializer(user_msg).data,
             'assistant_message': MessageSerializer(assistant_msg).data,
-            'sql_query': sql_query,
+            # AI Agent 응답 데이터 (Vue에서 사용)
+            'response': assistant_response,
+            'sql': sql_query,
+            'plan_analysis': plan_analysis,
             'results': results,
+            'error': error_message,
             'message_count': context.message_count
         })
-        
+    
     except Conversation.DoesNotExist:
         return Response(
             {'error': '대화를 찾을 수 없습니다.'},
             status=status.HTTP_404_NOT_FOUND
         )
+    
     except Exception as e:
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"Chat error: {str(e)}")
+        logger.error(f"Chat error: {str(e)}", exc_info=True)
         
         return Response(
             {'error': f'처리 중 오류 발생: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+

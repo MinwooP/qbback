@@ -7,6 +7,38 @@ SECRET_KEY = 'your-secret-key-here'  # 실제 환경에서는 환경변수로 �
 DEBUG = True
 ALLOWED_HOSTS = ['*']
 
+# AI_AGENT 변수 설정
+# 환경변수에서 'AI_AGENT_URL' 값을 읽어오고, 값이 없다면 기본값 사용
+AI_AGENT_URL = os.getenv('AI_AGENT_URL', 'http://10.220.150.75:8019/api/v1')
+# AI Agent 서버 요청 시 최대 대기 시간
+# 타임아웃 (초)
+AI_AGENT_TIMEOUT = 30 
+
+# AI_AGENT 관련 로깅 설정
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            # 로그 메세지 출력 형식 - 로그 레벨, 로그 발생 시간, 로그 발생 파일 이름, 실제 로그 메시지 
+            'format': '{levelname} {asctime} {module} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+    },
+    'loggers': {
+        'api': {
+            'handlers': ['console'],
+            'level': 'INFO',
+        },
+    },
+}
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
