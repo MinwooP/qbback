@@ -373,7 +373,6 @@ export default {
 
     // Suggestions 설정
     const suggestions = window.APP_CONFIG?.SUGGESTIONS || []
-
     console.log('Loaded suggestions:', suggestions.value)
 
     // Vue Router 초기화
@@ -418,24 +417,44 @@ export default {
       return isValid
     }
 
-    const logout = () => {
-      sessionStorage.removeItem('isLoggedIn')
-      sessionStorage.removeItem('user')
-
-      // 추가 세션 정보 모두 제거
-      sessionStorage.removeItem('sessionId')
-      sessionStorage.removeItem('sessionToken')
-      sessionStorage.removeItem('sessionCreatedAt')
-      sessionStorage.removeItem('allowSkipPasswordChange')
-      
-      // window 객체의 세션 정보도 제거
-      if (window.currentSession) {
-        delete window.currentSession
+    const logout = async () => {
+      if (!confirm('정말로 로그아웃하시겠습니까?')) {
+        return;
       }
-      
-      console.log('세션 정보가 모두 정리되었습니다.')
-      
-      router.replace('/login')
+
+      try {
+        // Django 로그아웃 API 호출
+        const response = await fetch(`${API_URL}/auth/logout/`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${sessionStorage.getItem('sessionToken')}`
+          }
+        });
+
+        if (response.ok) {
+          console.log('서버 로그아웃 성공');
+        } else {
+          console.error('서버 로그아웃 실패:', response.status);
+        }
+      } catch (error) {
+        console.error('로그아웃 API 호출 오류:', error);
+      } finally {
+        // 로컬 세션 정보 삭제 (API 실패해도 클라이언트는 정리)
+        sessionStorage.removeItem('isLoggedIn');
+        sessionStorage.removeItem('user');
+        sessionStorage.removeItem('sessionId');
+        sessionStorage.removeItem('sessionToken');
+        sessionStorage.removeItem('sessionCreatedAt');
+        sessionStorage.removeItem('allowSkipPasswordChange');
+        
+        if (window.currentSession) {
+          delete window.currentSession;
+        }
+        
+        console.log('로컬 세션 정보가 모두 정리되었습니다.');
+        router.replace('/login');
+      }
     }
 
     const goToSQLManage = () => {
@@ -498,6 +517,118 @@ export default {
         connectionStatus.value = 'disconnected'
       }
     }
+
+    // 대화 목록 로드 - Django API 호출
+    const loadConversations = async () => {
+      try {
+        const response = await fetch(`${API_URL}/conversations/`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${sessionStorage.getItem('sessionToken')}`
+          }
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const conversationsData = await response.json();
+        
+        // Django API 응답 형식에 맞게 변환
+        conversations.value = conversationsData.map(conv => ({
+          id: conv.conversation_id,
+          title: conv.title,
+          messages: [], // 메시지는 필요할 때 따로 로드
+          lastMessage: new Date(conv.last_message_at || conv.updated_at),
+          createdAt: new Date(conv.created_at),
+          sessionId: conv.conversation_session_id
+        }));
+
+        console.log(`${conversations.value.length}개의 대화를 로드했습니다.`);
+        
+        // 첫 번째 대화 선택 (있는 경우)
+        if (conversations.value.length > 0) {
+          await selectConversation(conversations.value[0].id);
+        }
+      } catch (error) {
+        console.error('대화 목록 로드 실패:', error);
+        connectionStatus.value = 'disconnected';
+      }
+    };
+
+    // 특정 대화 선택 시, 해당 대화로 현재 대화 설정하기
+    // 특정 대화에 대한 메세지 로드
+    const selectConversation = async (conversationId) => {
+      currentConversationId.value = conversationId;
+      
+      const conversation = conversations.value.find(c => c.id === conversationId);
+      if (!conversation) return;
+
+      currentConversationSessionId.value = conversation.sessionId;
+      
+      // 메시지가 아직 로드되지 않았으면 로드
+      if (!conversation.messages || conversation.messages.length === 0) {
+        await loadConversationMessages(conversationId);
+      }
+      
+      nextTick(() => {
+        scrollToBottom();
+        highlightSQLCode();
+      });
+    };
+
+    // 특정 대화에 대한 메세지 상세 조회
+    const loadConversationMessages = async (conversationId) => {
+      try {
+        const response = await fetch(`${API_URL}/conversations/${conversationId}/`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${sessionStorage.getItem('sessionToken')}`
+          }
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const conversationData = await response.json();
+        
+        // conversation 내 현재 대화 찾고 받아온 메세지 저장
+        const conversation = conversations.value.find(c => c.id === conversationId);
+        if (!conversation) return;
+
+        // 메시지 변환 및 저장
+        conversation.messages = conversationData.messages.map(msg => {
+          if (msg.sender === 'user') {
+            return {
+              id: msg.message_id,
+              sender: 'user',
+              text: msg.message_text,
+              timestamp: new Date(msg.created_at)
+            };
+          } else {
+            return {
+              id: msg.message_id,
+              sender: 'assistant',
+              response: msg.message_text,
+              sql: msg.sql_query || '',
+              plan_analysis: msg.plan_analysis || '',
+              results: msg.sql_results || [],
+              error: msg.error_message || '',
+              timestamp: new Date(msg.created_at),
+              hasPlanAnalysis: !!msg.plan_analysis,
+              showNoResults: msg.sql_results && Array.isArray(msg.sql_results) && msg.sql_results.length === 0
+            };
+          }
+        });
+
+        console.log(`대화 ${conversationId}의 메시지 ${conversation.messages.length}개 로드됨`);
+      } catch (error) {
+        console.error('대화 메시지 로드 실패:', error);
+      }
+    };
 
     // 예제 쿼리 전송
     const sendExampleQuery = (query) => {
@@ -940,6 +1071,7 @@ export default {
       }
       
       conversations.value.unshift(tempConversation)
+      currentConversationId.value = null
       console.log('새 대화 준비 (서버 생성 안 됨)')
     }
 
@@ -961,13 +1093,13 @@ export default {
     //   })
     // }
 
-    // const highlightSQLCode = () => {
-    //   nextTick(() => {
-    //     document.querySelectorAll('code.language-sql').forEach((block) => {
-    //       Prism.highlightElement(block)
-    //     })
-    //   })
-    // }
+    const highlightSQLCode = () => {
+      nextTick(() => {
+        document.querySelectorAll('code.language-sql').forEach((block) => {
+          Prism.highlightElement(block)
+        })
+      })
+    }
 
     // 클립보드 복사 함수
     const copyQueryToClipboard = async (query, messageId) => {
@@ -1026,17 +1158,46 @@ export default {
     }
 
     // 대화 삭제
-    const deleteConversation = (conversationId) => {
-      if (conversations.value.length <= 1) return
-
-      const index = conversations.value.findIndex(c => c.id === conversationId)
-      if (index !== -1) {
-        conversations.value.splice(index, 1)
-        if (currentConversationId.value === conversationId) {
-          currentConversationId.value = conversations.value[0].id
-        }
+    const deleteConversation = async (conversationId) => {
+      if (!confirm('이 대화를 삭제하시겠습니까?')) {
+        return;
       }
-    }
+
+      try {
+        const response = await fetch(`${API_URL}/conversations/${conversationId}/`, {
+          method: 'DELETE',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${sessionStorage.getItem('sessionToken')}`
+          }
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        // 로컬에서도 제거
+        const index = conversations.value.findIndex(c => c.id === conversationId);
+        if (index !== -1) {
+          conversations.value.splice(index, 1);
+        }
+
+        // 삭제한 대화가 현재 선택된 대화였다면 다른 대화 선택
+        if (currentConversationId.value === conversationId) {
+          if (conversations.value.length > 0) {
+            await selectConversation(conversations.value[0].id);
+          } else {
+            currentConversationId.value = null;
+            currentConversationSessionId.value = null;
+          }
+        }
+
+        console.log(`대화 ${conversationId} 삭제 완료`);
+      } catch (error) {
+        console.error('대화 삭제 실패:', error);
+        alert('대화 삭제에 실패했습니다.');
+      }
+    };
 
     // 사이드바 토글
     const toggleSidebar = () => {
@@ -1090,7 +1251,7 @@ export default {
     }
 
     // 초기화
-    onMounted(() => {
+    onMounted(async () => {
       if (!checkAuth()) {
         return
       }
@@ -1098,6 +1259,7 @@ export default {
       createNewChat()
       checkAPIConnection()
       setupExportFunction()
+      await loadConversations();
 
       nextTick(() => {
         scrollToBottom()

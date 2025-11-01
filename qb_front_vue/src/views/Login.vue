@@ -90,6 +90,9 @@ const errorMessage = ref('')
 const isLoading = ref(false)
 const showPasswordChangePopup = ref(false)
 
+//TO DO: API_URL 해결하기
+
+/*
 // 세션 ID 생성 함수
 const generateSessionId = () => {
   const timestamp = new Date().getTime()
@@ -135,7 +138,9 @@ const setSessionInfo = (sessionData) => {
     console.error('세션 정보 저장 중 오류:', error)
   }
 }
+*/
 
+// django 로그인 API 호출
 const handleLogin = async () => {
   // 에러 메시지 초기화
   errorMessage.value = ''
@@ -144,80 +149,80 @@ const handleLogin = async () => {
   try {
     console.log('Login attempt:', { employeeId: employeeId.value, password: password.value })
 
-    // 실제 로그인 API 호출 (예시)
-    const loginResult = await performLogin()
+    // django 로그인 api 호출 
+    const response = await fetch(`${API_URL}/auth/login/`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: employeeId.value,
+        password: password.value
+      })
+    });
 
-    if (loginResult.success) {
-      // 세션 ID 및 토큰 생성
-      const sessionData = {
-        sessionId: generateSessionId(),
-        token: generateSessionToken(),
-        userId: employeeId.value,
-        createdAt: new Date().toISOString(),
-        loginTime: new Date()
-      }
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.error || '로그인에 실패했습니다.');
+    }
 
+    const loginData = await response.json();
+
+    // ==========================================
+    // 응답 데이터 구조:
+    // {
+    //   "success": true,
+    //   "user": { user_id, username, user_type, is_initial_password },
+    //   "session": { session_id, token, expires_at }
+    // }
+    // ==========================================
+
+    if (loginData.success) {
       // 세션 정보 저장
-      setSessionInfo(sessionData)
-
-      // 세션에 로그인 상태 저장
-      sessionStorage.setItem('isLoggedIn', 'true')
-      sessionStorage.setItem('user', JSON.stringify({
-        employeeId: employeeId.value,
-        isInitialPassword: loginResult.isInitialPassword,
-        userType: loginResult.userType,
-        // 기타 사용자 정보
-        sessionId: sessionData.sessionId,
-        loginTime: sessionData.createdAt,
-      }))
-
-      console.log('로그인 성공! 생성된 세션 정보:', sessionData)
+      sessionStorage.setItem('sessionId', loginData.session.session_id);
+      sessionStorage.setItem('sessionToken', loginData.session.token);
+      sessionStorage.setItem('sessionCreatedAt', new Date().toISOString());
       
-      // 초기 비밀번호인지 확인
-      if (loginResult.isInitialPassword) {
-        // 초기 비밀번호면 팝업 표시
-        showPasswordChangePopup.value = true
-      } else {
-        // 일반 로그인이면 바로 채팅 페이지로
-        navigateToChat()
-      }
-    } else {
-      errorMessage.value = '사번 또는 비밀번호가 올바르지 않습니다.'
+      // 사용자 정보 저장
+      sessionStorage.setItem('isLoggedIn', 'true');
+      sessionStorage.setItem('user', JSON.stringify({
+        userId: loginData.user.user_id,
+        employeeId: loginData.user.username,
+        isInitialPassword: loginData.user.is_initial_password,
+        userType: loginData.user.user_type,
+        sessionId: loginData.session.session_id,
+        loginTime: new Date().toISOString()
+      }));
+
+      // 전역 세션 정보 (선택사항)
+      window.currentSession = {
+        id: loginData.session.session_id,
+        token: loginData.session.token,
+        userId: loginData.user.user_id
+      };
+
+      console.log('로그인 성공! 세션 정보:', {
+        sessionId: loginData.session.session_id,
+        userId: loginData.user.user_id,
+        userType: loginData.user.user_type
+      });
+
+      // // 초기 비밀번호 확인 => 현재는 비활성화 
+      // if (loginData.user.is_initial_password) {
+      //   // 초기 비밀번호면 팝업 표시
+      //   showPasswordChangePopup.value = true;
+      // } else {
+      //   // 일반 로그인이면 바로 채팅 페이지로
+      //   navigateToChat();
+      // }
     }
   } catch (error) {
-    console.error('로그인 실패:', error)
-    errorMessage.value = '로그인 중 오류가 발생했습니다. 다시 시도해주세요.'
+    console.error('로그인 실패:', error);
+    errorMessage.value = error.message || '로그인 중 오류가 발생했습니다. 다시 시도해주세요.';
   } finally {
-    isLoading.value = false
+    isLoading.value = false;
   }
-}
-
-const performLogin = async () => {
-  // 실제 로그인 API 호출 로직
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      // 실제로는 서버 API 호출
-      const validAccounts = [
-        { employeeId: 'aiadm', password: 'new1234!', isInitialPassword: false, userType:'admin' },
-        { employeeId: 'user', password: 'new1234!', isInitialPassword: false, userType: 'user'}
-      ]
-
-      const account = validAccounts.find(acc =>
-        acc.employeeId === employeeId.value && acc.password === password.value
-      )
-
-      if (account) {
-        resolve({
-          success: true,
-          isInitialPassword: account.isInitialPassword,
-          userType: account.userType
-        })
-      } else {
-        resolve({ success: false })
-      }
-    }, 1000) // 1초 지연으로 로딩 상태 시뮬레이션
-  })
-}
+};
 
 const goToChangePassword = () => {
   showPasswordChangePopup.value = false
@@ -238,6 +243,45 @@ const navigateToChat = () => {
   const redirectPath = route.query.redirect || '/chat'
   router.push(redirectPath)
 }
+
+// 세션 검증 API: 페이지 로드 시 세션 확인
+const validateSession = async () => {
+  const sessionToken = sessionStorage.getItem('sessionToken');
+  
+  if (!sessionToken) {
+    return false;
+  }
+
+  try {
+    const response = await fetch(`${API_URL}/auth/validate/`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${sessionToken}`
+      }
+    });
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const data = await response.json();
+    return data.valid === true;
+  } catch (error) {
+    console.error('세션 검증 실패:', error);
+    return false;
+  }
+};
+
+onMounted(async () => {
+  // 이미 로그인된 경우 자동으로 채팅 페이지로 이동
+  const isValid = await validateSession();
+  if (isValid) {
+    console.log('유효한 세션이 존재합니다. 채팅 페이지로 이동합니다.');
+    router.replace('/chat');
+  }
+});
+
 </script>
 
 <style scoped>

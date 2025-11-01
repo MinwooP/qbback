@@ -130,77 +130,87 @@ const errorMessage = ref('')
 const successMessage = ref('')
 const isLoading = ref(false)
 
+//TO DO: API_URL 통일하기
+
+// 비밀번호 변경 함수 - Django API 호출
 const handleChangePassword = async () => {
-  // 에러 메시지 초기화
-  errorMessage.value = ''
-  successMessage.value = ''
-  
   // 비밀번호 유효성 검사
   if (newPassword.value !== confirmPassword.value) {
-    errorMessage.value = '새 비밀번호가 일치하지 않습니다.'
-    return
+    errorMessage.value = '새 비밀번호가 일치하지 않습니다.';
+    return;
   }
-  
+
   if (newPassword.value.length < 8) {
-    errorMessage.value = '비밀번호는 8자 이상이어야 합니다.'
-    return
+    errorMessage.value = '비밀번호는 최소 8자 이상이어야 합니다.';
+    return;
   }
-  
-  // 비밀번호 강도 검사 (간단한 버전)
-  const passwordRegex = /^(?=.*[a-zA-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/
+
+  // 비밀번호 강도 검증 (영문, 숫자, 특수문자 포함)
+  const passwordRegex = /^(?=.*[A-Za-z])(?=.*\d)(?=.*[@$!%*#?&])[A-Za-z\d@$!%*#?&]{8,}$/;
   if (!passwordRegex.test(newPassword.value)) {
-    errorMessage.value = '비밀번호는 영문, 숫자, 특수문자를 포함해야 합니다.'
-    return
+    errorMessage.value = '비밀번호는 영문, 숫자, 특수문자를 포함해야 합니다.';
+    return;
   }
-  
-  isLoading.value = true
-  
+
+  errorMessage.value = '';
+  successMessage.value = '';
+  isLoading.value = true;
+
   try {
-    console.log('비밀번호 변경 시도:', {
-      currentPassword: currentPassword.value,
-      newPassword: newPassword.value
-    })
-    
-    // 비밀번호 변경 API 호출 시뮬레이션
-    const changeSuccess = await simulatePasswordChange()
-    
-    if (changeSuccess) {
-      successMessage.value = '비밀번호가 성공적으로 변경되었습니다.'
+    // ==========================================
+    // Django 비밀번호 변경 API 호출
+    // ==========================================
+    const response = await fetch(`${API_URL}/auth/change-password/`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${sessionStorage.getItem('sessionToken')}`
+      },
+      body: JSON.stringify({
+        current_password: currentPassword.value,
+        new_password: newPassword.value
+      })
+    });
+
+    const resultData = await response.json();
+
+    if (!response.ok) {
+      throw new Error(resultData.error || '비밀번호 변경에 실패했습니다.');
+    }
+
+    // ==========================================
+    // 성공 응답:
+    // {
+    //   "success": true,
+    //   "message": "비밀번호가 성공적으로 변경되었습니다."
+    // }
+    // ==========================================
+
+    if (resultData.success) {
+      successMessage.value = '비밀번호가 성공적으로 변경되었습니다!';
       
       // 사용자 정보 업데이트 (초기 비밀번호 플래그 해제)
-      const user = JSON.parse(sessionStorage.getItem('user') || '{}')
-      user.isInitialPassword = false
-      sessionStorage.setItem('user', JSON.stringify(user))
+      const user = JSON.parse(sessionStorage.getItem('user') || '{}');
+      user.isInitialPassword = false;
+      sessionStorage.setItem('user', JSON.stringify(user));
+      
+      // 'allowSkipPasswordChange' 플래그 제거
+      sessionStorage.removeItem('allowSkipPasswordChange');
+      
+      console.log('비밀번호 변경 완료');
       
       // 2초 후 채팅 페이지로 이동
       setTimeout(() => {
-        router.push('/chat')
-      }, 2000)
-    } else {
-      errorMessage.value = '현재 비밀번호가 올바르지 않습니다.'
+        router.push('/chat');
+      }, 2000);
     }
   } catch (error) {
-    console.error('비밀번호 변경 실패:', error)
-    errorMessage.value = '비밀번호 변경 중 오류가 발생했습니다. 다시 시도해주세요.'
+    console.error('비밀번호 변경 실패:', error);
+    errorMessage.value = error.message || '비밀번호 변경 중 오류가 발생했습니다. 다시 시도해주세요.';
   } finally {
-    isLoading.value = false
+    isLoading.value = false;
   }
-}
-
-const simulatePasswordChange = async () => {
-  // 실제 비밀번호 변경 API 호출 로직
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      // 현재 비밀번호 검증 시뮬레이션
-      // 실제로는 서버에서 현재 비밀번호를 확인
-      if (currentPassword.value === 'new1234!' || currentPassword.value === 'password') {
-        resolve(true)
-      } else {
-        resolve(false)
-      }
-    }, 1500) // 1.5초 지연으로 로딩 상태 시뮬레이션
-  })
-}
+};
 
 const goToChat = () => {
   router.push('/chat')

@@ -5,6 +5,9 @@ import Login from '@/views/Login.vue'
 import ChangePassword from '@/views/ChangePassword.vue'
 import SQLManage from '@/views/SQLManage.vue'
 
+// TO DO: API 설정
+const API_URL = window.APP_CONFIG?.API_URL || 'http://10.220.150.75:8012/api/v1';
+
 const routes = [
   {
     path: '/',
@@ -42,11 +45,15 @@ const router = createRouter({
   routes
 })
 
-// 로그인 상태 확인 함수
+// 로그인 상태 확인 함수 
 function isAuthenticated() {
-  return sessionStorage.getItem('isLoggedIn') === 'true' || 
-         sessionStorage.getItem('user') !== null ||
-         sessionStorage.getItem('authToken') !== null;
+  const sessionId = sessionStorage.getItem('sessionId');
+  const sessionToken = sessionStorage.getItem('sessionToken');
+  const isLoggedIn = sessionStorage.getItem('isLoggedIn');
+  const user = sessionStorage.getItem('user');
+  
+  // 모든 필수 세션 정보가 있는지 확인
+  return !!(sessionId && sessionToken && isLoggedIn === 'true' && user);
 }
 
 // 초기 비밀번호 사용자인지 확인 함수
@@ -61,6 +68,36 @@ function isAdmin(){
   return user.userType =='admin'
 }
 
+// 서버 세션 검증 
+// TO DO: 사용될 부분 찾아보기
+async function validateServerSession() {
+  const sessionToken = sessionStorage.getItem('sessionToken');
+  
+  if (!sessionToken) {
+    return false;
+  }
+
+  try {
+    const response = await fetch(`${API_URL}/auth/validate/`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${sessionToken}`
+      }
+    });
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const data = await response.json();
+    return data.valid === true;
+  } catch (error) {
+    console.error('세션 검증 실패:', error);
+    return false;
+  }
+}
+
 router.beforeEach((to, from, next) => {
   const authenticated = isAuthenticated()
   
@@ -73,6 +110,20 @@ router.beforeEach((to, from, next) => {
         query: { redirect: to.fullPath } // 로그인 후 원래 페이지로 돌아가기 위한 정보 저장
       });
     } else {
+      
+      // 서버 세션 검증 추가
+      // 주의: 매 라우팅마다 API 호출하면 성능 저하 가능
+      // 필요시 주석 해제하기
+      // ========================================
+      // const isValidSession = await validateServerSession();
+      // if (!isValidSession) {
+      //   // 세션 만료됨
+      //   sessionStorage.clear();
+      //   alert('세션이 만료되었습니다. 다시 로그인해주세요.');
+      //   next('/login');
+      //   return;
+      // }
+
       //관리자 접근 확인
       if(to.matched.some(record => record.meta.requiresAdmin)){
         if(!isAdmin()){
@@ -81,6 +132,7 @@ router.beforeEach((to, from, next) => {
           return
         }
       }
+
       // 인증된 사용자이지만 초기 비밀번호를 사용 중이고, 비밀번호 변경 페이지가 아닌 경우
       if (isInitialPasswordUser() && to.path !== '/change-password') {
         // 초기 비밀번호 사용자는 비밀번호 변경 페이지로만 접근 가능
